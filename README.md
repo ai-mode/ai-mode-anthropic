@@ -1,4 +1,21 @@
-# Anthropic Backend for AI Mode
+## Anthropic Backend for AI Mode
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Installation](#installation)
+  - [Git Installation](#git-installation)
+  - [Package Manager (Future)](#package-manager-future)
+- [Configuration](#configuration)
+- [Usage](#usage)
+  - [Model Selection](#model-selection)
+  - [Integration with AI Mode Features](#integration-with-ai-mode-features)
+  - [Advanced Configuration](#advanced-configuration)
+  - [Adding Custom Models](#adding-custom-models)
+- [Related Resources](#related-resources)
+  - [AI Mode Ecosystem](#ai-mode-ecosystem)
+  - [Documentation and Community](#documentation-and-community)
+- [Legal Notice](#legal-notice)
 
 ## Overview
 
@@ -87,6 +104,36 @@ Customize model behavior per use case:
 (setq ai-mode-anthropic-version "2023-06-01")  ; API version
 ```
 
+### Adding Custom Models
+
+You can extend the list of available Anthropic Claude models by adding your own custom configurations to `ai-mode`'s model providers. This is useful if you want to test specific model versions, experiment with different `temperature` or `max-tokens` settings, or integrate models not explicitly listed by default.
+
+To add a custom model, modify your Emacs configuration file (e.g., `.emacs` or `init.el`) like this:
+
+```elisp
+(add-to-list 'ai-mode--models-providers
+             (lambda ()
+               (list (ai-mode-anthropic--make-model "claude-3-5-sonnet-20240620"
+                                                       :name "My Custom Claude Sonnet"
+                                                       :temperature 0.5
+                                                       :max-tokens 8192))))
+
+;; If you use ai-chat, also add it to ai-chat--models-providers
+(add-to-list 'ai-chat--models-providers
+             (lambda ()
+               (list (ai-mode-anthropic--make-model "claude-3-5-sonnet-20240620"
+                                                       :name "My Custom Claude Sonnet"
+                                                       :temperature 0.5
+                                                       :max-tokens 8192))))
+```
+
+In this example:
+- `claude-3-5-sonnet-20240620` is the model version (which needs to be a valid Anthropic model name).
+- `:name` sets a custom display name for your model in `ai-mode`'s selection interface.
+- `:temperature` and `:max-tokens` allow you to override the default settings for this specific model.
+
+Remember to restart Emacs or re-evaluate your configuration after making changes. Your custom model will then appear in `ai-mode`'s model selection list.
+
 The backend handles all API communication, authentication, and response processing automatically, allowing you to focus on your work while benefiting from Anthropic's powerful Claude models.
 
 ## Related Resources
@@ -94,13 +141,15 @@ The backend handles all API communication, authentication, and response processi
 ### AI Mode Ecosystem
 
 - **[AI Mode](https://github.com/ai-mode/ai-mode)**: The core AI-powered Emacs extension that this backend supports
-- **[AI Mode OpenAI](https://github.com/ai-mode/ai-mode-openai)**: OpenAI GPT backend for ai-mode
+- **[AI Mode OpenAI](https://github.com/ai-mode/ai-mode-openai)**: OpenAI backend for `ai-mode`.
+- **[AI Mode Anthropic](https://github.com/ai-mode/ai-mode-anthropic)**: Anthropic Claude backend for ai-mode
 - **[AI Mode DeepSeek](https://github.com/ai-mode/ai-mode-deepseek)**: DeepSeek backend for ai-mode
 - **[AI Mode Hugging Face](https://github.com/ai-mode/ai-mode-hf)**: Hugging Face models backend for ai-mode
+- **[AI Mode Google Generative AI](https://github.com/ai-mode/ai-mode-google-genai)**: Google Generative AI backend for `ai-mode`.
 
 ### Documentation and Community
 
-- **[AI Mode Discussions](https://github.com/ai-mode/ai-mode/discussions)**: Community forum for questions and ideas
+-   **[AI Mode Discussions](https://github.com/ai-mode/ai-mode/discussions)**: Community forum for questions and ideas
 
 ## Legal Notice
 
