@@ -49,7 +49,7 @@
 
 
 (require 'ai-utils)
-
+(require 'ai-mode-adapter-api) ; Added require statement
 (require 'url)
 
 
@@ -149,7 +149,9 @@ EXTRA-PARAMS is a list of properties (plist) that can be used to store parameter
     (user-input . "user")
     (assistant-response . "assistant")
     (action-context . "user")
-    (file-context . "user"))
+    (file-context . "user")
+    (project-context . "user")
+    (file-metadata . "user"))
   "Mapping from structure types to roles for Anthropic API.
 Supports both string keys and keyword symbols as types that map to
 the two valid Anthropic role values: 'assistant' and 'user'.
@@ -163,10 +165,11 @@ Note: Anthropic doesn't support system role directly, so system messages are map
   "Return the role for the given STRUCT-TYPE using customizable role mapping."
   (let* ((role-mapping ai-mode-anthropic--struct-type-role-mapping)
          (type (if (symbolp struct-type) (symbol-name struct-type) struct-type))
+         (struct-type-string (if (symbolp struct-type) (symbol-name struct-type) struct-type))
          (role (if (symbolp struct-type)
                    (cdr (cl-assoc struct-type role-mapping))
                  (cdr (cl-assoc type role-mapping :test #'equal)))))
-    role))
+    (or role struct-type-string)))
 
 
 (defun ai-mode-anthropic--convert-struct-to-model-message (item role-mapping)
@@ -183,9 +186,9 @@ Supports both alist and plist structures for ITEM."
         ("content" . ,content))))
    ;; Handle plist structure
    ((plistp item)
-    (let* ((type (plist-get item :type))
+    (let* ((type (ai-mode-adapter--get-struct-type item))
            (model-role (ai-mode-anthropic--get-role-for-struct-type type))
-           (content (plist-get item :content)))
+           (content (ai-mode-adapter--get-struct-content item)))
       `(("role" . ,model-role)
         ("content" . ,content))))))
 
