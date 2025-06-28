@@ -36,6 +36,7 @@
 ;; - Customizable parameters (temperature, max tokens, etc.)
 ;; - Role mapping for different message types
 ;; - Error handling and response processing
+;; - Prompt caching support for optimized performance
 ;;
 ;; To use this package:
 ;; 1. Install ai-mode and ai-mode-anthropic
@@ -89,6 +90,12 @@
   :type '(choice integer (const nil))
   :group 'ai-mode-anthropic)
 
+(defcustom ai-mode-anthropic-max-cache-blocks 4
+  "Maximum number of blocks with cache_control allowed in a single request.
+Anthropic API has a limit of 4 cached blocks per request."
+  :type 'integer
+  :group 'ai-mode-anthropic)
+
 
 (defun ai-mode-anthropic--get-response-choices (response)
   "Extract choices list from RESPONSE."
@@ -119,13 +126,14 @@
   :group 'ai-mode-anthropic)
 
 
-(cl-defun ai-mode-anthropic--async-api-request (request-data callback &key (fail-callback nil) (extra-params nil))
+(cl-defun ai-mode-anthropic--async-api-request (request-data callback &key (fail-callback nil) (extra-params nil) (use-1h-cache nil))
   "Asynchronous REQUEST-DATA execution of a request to the Anthropic Claude API.
 
 In case of a successful request execution, a CALLBACK function is called.
 
 If request failed then FAIL-CALLBACK called if it is provided.
-EXTRA-PARAMS is a list of properties (plist) that can be used to store parameters."
+EXTRA-PARAMS is a list of properties (plist) that can be used to store parameters.
+USE-1H-CACHE when non-nil enables 1-hour cache support by adding the appropriate beta header."
   (when (null ai-mode-anthropic--api-key)
     (error "Anthropic API key is not set"))
 
@@ -135,6 +143,9 @@ EXTRA-PARAMS is a list of properties (plist) that can be used to store parameter
          (headers  `(("Content-Type" . "application/json")
                      ("anthropic-version" . ,ai-mode-anthropic-version)
                      ("x-api-key" . ,(format "%s" ai-mode-anthropic--api-key)))))
+    ;; Add beta header for 1-hour cache support if needed
+    (when use-1h-cache
+      (push '("anthropic-beta" . "extended-cache-ttl-2025-04-11") headers))
     (ai-utils--async-request api-url "POST" encoded-request-data headers callback :timeout timeout)))
 
 (defcustom ai-mode-anthropic--struct-type-role-mapping
@@ -151,7 +162,9 @@ EXTRA-PARAMS is a list of properties (plist) that can be used to store parameter
     (action-context . "user")
     (file-context . "user")
     (project-context . "user")
-    (file-metadata . "user"))
+    (file-metadata . "user")
+    (project-ai-summary . "user")
+    (memory . "user"))
   "Mapping from structure types to roles for Anthropic API.
 Supports both string keys and keyword symbols as types that map to
 the two valid Anthropic role values: 'assistant' and 'user'.
@@ -172,33 +185,103 @@ Note: Anthropic doesn't support system role directly, so system messages are map
     (or role struct-type-string)))
 
 
-(defun ai-mode-anthropic--convert-struct-to-model-message (item role-mapping)
+(defun ai-mode-anthropic--create-cache-control (ttl enforced-ttl)
+  "Create cache control object with specified TTL.
+TTL should be a string like '5m', '1h', etc. Uses ai-mode-adapter-api-ttl-to-seconds
+to convert TTL to seconds and applies threshold logic:
+- If TTL seconds > 300 (5 minutes), use 1-hour cache
+- If TTL seconds is between 1 and 300 (inclusive), use 5-minute cache
+- If TTL seconds is 0, no cache control is returned
+
+ENFORCED-TTL when non-nil forces the cache to use specific TTL instead of the calculated one
+based on the original TTL. This is used to ensure proper TTL ordering in Anthropic API."
+  (let ((ttl-seconds (ai-mode-adapter-api-ttl-to-seconds ttl)))
+    (cond
+     ((= ttl-seconds 0) nil)  ; No caching
+     (enforced-ttl  ; Use enforced TTL
+      (if (equal enforced-ttl "1h")
+          `(("type" . "ephemeral") ("ttl" . "1h"))
+        `(("type" . "ephemeral"))))
+     ((> ttl-seconds 300) `(("type" . "ephemeral") ("ttl" . "1h")))  ; 1h cache for TTL > 5m
+     (t `(("type" . "ephemeral"))))))  ; 5m cache for TTL between 1s and 5m inclusive
+
+
+(defun ai-mode-anthropic--convert-struct-to-model-message (item role-mapping &optional enable-caching cache-counter enforced-cache-ttl)
   "Convert a single ITEM into a message format using ROLE-MAPPING.
-Supports both alist and plist structures for ITEM."
-  (cond
-   ;; Handle alist structure
-   ((and (listp item) (consp (car item)) (stringp (caar item)))
-    (let* ((role (cdr (assoc "role" item)))
-           (model-role (or (cdr (assoc role role-mapping))
-                           (ai-mode-anthropic--get-role-for-struct-type role)))
-           (content (cdr (assoc "content" item))))
-      `(("role" . ,model-role)
-        ("content" . ,content))))
-   ;; Handle plist structure
-   ((plistp item)
-    (let* ((type (ai-mode-adapter--get-struct-type item))
-           (model-role (ai-mode-anthropic--get-role-for-struct-type type))
-           (content (ai-mode-adapter--get-struct-content item)))
-      `(("role" . ,model-role)
-        ("content" . ,content))))))
+ITEM should be a plist structure.
+
+When ENABLE-CACHING is non-nil, evaluates whether the item should be cached
+using `ai-mode-adapter-api-should-cache-content-p` and adds cache_control
+parameter if appropriate. TTL is determined individually for each record
+based on its parameters using `ai-mode-adapter-api-get-cache-ttl`.
+
+CACHE-COUNTER should be a cons cell (current-count . max-count) to track
+the number of cached blocks. The car is incremented when cache is applied.
+
+ENFORCED-CACHE-TTL when non-nil forces all cached items to use this specific TTL
+instead of their individually calculated TTL. This ensures TTL ordering requirements."
+  (let* ((type (ai-mode-adapter-api-get-struct-type item))
+         (model-role (ai-mode-anthropic--get-role-for-struct-type type))
+         (content (ai-mode-adapter-api-get-struct-content item))
+         (should-cache (and enable-caching
+                           (ai-mode-adapter-api-should-cache-content-p item)
+                           cache-counter
+                           (< (car cache-counter) (cdr cache-counter))))
+         (content-block `(("type" . "text")
+                          ("text" . ,content))))
+
+    ;; Add cache control if needed and under limit
+    (when should-cache
+      (let* ((item-ttl (ai-mode-adapter-api-get-cache-ttl item))
+             (cache-control (ai-mode-anthropic--create-cache-control item-ttl enforced-cache-ttl)))
+        (when cache-control
+          (setq content-block (append content-block `(("cache_control" . ,cache-control))))
+          ;; Increment the cache counter
+          (setcar cache-counter (1+ (car cache-counter))))))
+
+    ;; Always use array format with content blocks
+    `(("role" . ,model-role)
+      ("content" . ,(vector content-block)))))
 
 
-(defun ai-mode-anthropic--structs-to-model-messages (messages model)
-  "Convert MESSAGES into Anthropic API messages using MODEL role-mapping."
-  (let* ((role-mapping (map-elt model :role-mapping)))
+(defun ai-mode-anthropic--determine-enforced-cache-ttl (messages)
+  "Determine the enforced cache TTL to ensure proper ordering.
+Analyzes MESSAGES to find cacheable items and their TTLs, then returns
+the minimum TTL that should be enforced to avoid ordering violations.
+Returns nil if no enforcement is needed."
+  (let* ((cacheable-ttls '()))
+    ;; Collect TTLs of all cacheable messages
+    (dolist (item messages)
+      (when (ai-mode-adapter-api-should-cache-content-p item)
+        (let* ((item-ttl (ai-mode-adapter-api-get-cache-ttl item))
+               (ttl-seconds (ai-mode-adapter-api-ttl-to-seconds item-ttl)))
+          (when (> ttl-seconds 0)
+            (push ttl-seconds cacheable-ttls)))))
+
+    ;; If we have both long (>300s) and short (<=300s) TTLs, enforce the shorter one
+    (when cacheable-ttls
+      (let ((has-long (cl-some (lambda (ttl) (> ttl 300)) cacheable-ttls))
+            (has-short (cl-some (lambda (ttl) (<= ttl 300)) cacheable-ttls)))
+        (when (and has-long has-short)
+          nil)))))  ; Use 5-minute cache for all when mixed
+
+
+(defun ai-mode-anthropic--structs-to-model-messages (messages model &optional enable-caching)
+  "Convert MESSAGES into Anthropic API messages using MODEL role-mapping.
+When ENABLE-CACHING is non-nil, evaluates caching for each message.
+TTL is determined individually for each record based on its parameters.
+Limits the number of cached blocks to ai-mode-anthropic-max-cache-blocks.
+
+Ensures proper TTL ordering by enforcing consistent TTL when mixed long/short TTLs are present."
+  (let* ((prepared-messages (ai-mode-adapter-api-prepare-messages messages))
+         (role-mapping (map-elt model :role-mapping))
+         (cache-counter (when enable-caching (cons 0 ai-mode-anthropic-max-cache-blocks)))
+         (enforced-cache-ttl (when enable-caching
+                              (ai-mode-anthropic--determine-enforced-cache-ttl prepared-messages))))
     (mapcar (lambda (item)
-              (ai-mode-anthropic--convert-struct-to-model-message item role-mapping))
-            messages)))
+              (ai-mode-anthropic--convert-struct-to-model-message
+               item role-mapping enable-caching cache-counter enforced-cache-ttl))
+            prepared-messages)))
 
 
 (defun ai-mode-anthropic--make-typed-struct (message)
@@ -213,7 +296,7 @@ ITEMS should contain message entries with 'text fields."
   (mapcar #'ai-mode-anthropic--make-typed-struct items))
 
 
-(cl-defun ai-mode-anthropic--convert-context-to-request-data (context model &key (extra-params nil))
+(cl-defun ai-mode-anthropic--convert-context-to-request-data (context model &key (extra-params nil) enable-caching)
   "Convert CONTEXT associative array to request data format.
 
 CONTEXT should be an alist containing:
@@ -226,13 +309,18 @@ MODEL should contain configuration like:
 - :n - number of completions
 - :rest-params - additional API parameters
 
-EXTRA-PARAMS can provide additional request parameters."
+EXTRA-PARAMS can provide additional request parameters.
+
+When ENABLE-CACHING is non-nil, prompt caching will be evaluated for messages.
+TTL is determined individually for each record based on its parameters.
+The number of cached blocks is limited to ai-mode-anthropic-max-cache-blocks."
   (let* ((version (map-elt model :version))
          (temperature (map-elt model :temperature))
          (max-tokens (map-elt model :max-tokens ai-mode-anthropic--default-max-tokens))
          (n (map-elt model :n ai-mode-anthropic--completion-choices))
          (model-rest-params (map-elt model :rest-params))
-         (messages (ai-mode-anthropic--structs-to-model-messages (map-elt context :messages) model))
+         (messages (ai-mode-anthropic--structs-to-model-messages
+                    (map-elt context :messages) model enable-caching))
          (payload (append
                    `(("model" . ,version)
                      ("messages" . ,messages))
@@ -253,14 +341,25 @@ EXTRA-PARAMS can provide additional request parameters."
 
 
 
-(cl-defun ai-mode-anthropic--async-send-context (context model &key success-callback (fail-callback nil) (extra-params nil))
+(cl-defun ai-mode-anthropic--async-send-context (context model &key success-callback (fail-callback nil) enable-caching (extra-params nil) )
   "Async execute CONTEXT, extract message from response and call SUCCESS-CALLBACK.
 
 If request fails, call FAIL-CALLBACK.
 
-EXTRA-PARAMS is a list of properties (plist) that can be used to store parameters."
+EXTRA-PARAMS is a list of properties (plist) that can be used to store parameters.
 
-  (let ((request-data (ai-mode-anthropic--convert-context-to-request-data context model :extra-params extra-params)))
+When ENABLE-CACHING is non-nil, prompt caching will be evaluated and applied
+to appropriate messages based on their content and type using
+`ai-mode-adapter-api-should-cache-content-p`. TTL is determined individually
+for each record based on its parameters. The number of cached blocks is
+limited to ai-mode-anthropic-max-cache-blocks."
+
+  (let* ((request-data (ai-mode-anthropic--convert-context-to-request-data
+                        context model
+                        :extra-params extra-params
+                        :enable-caching enable-caching))
+         ;; Check if any message uses 1-hour cache by examining the request data
+         (use-1h-cache (ai-mode-anthropic--request-uses-1h-cache request-data)))
     (ai-mode-anthropic--async-api-request
      request-data
      (lambda (response)
@@ -272,7 +371,23 @@ EXTRA-PARAMS is a list of properties (plist) that can be used to store parameter
                 (messages (ai-mode-anthropic--convert-items-to-context-structs choices)))
            (funcall success-callback messages))))
      :fail-callback fail-callback
-     :extra-params extra-params)))
+     :extra-params extra-params
+     :use-1h-cache use-1h-cache)))
+
+
+(defun ai-mode-anthropic--request-uses-1h-cache (request-data)
+  "Check if REQUEST-DATA contains any messages with 1-hour cache control."
+  (let ((messages (cdr (assoc "messages" request-data))))
+    (cl-some (lambda (message)
+               (let ((content (cdr (assoc "content" message))))
+                 ;; Check if content is an array (vector) of content blocks
+                 (when (vectorp content)
+                   (cl-some (lambda (content-block)
+                              (let ((cache-control (cdr (assoc "cache_control" content-block))))
+                                (and cache-control
+                                     (equal (cdr (assoc "ttl" cache-control)) "1h"))))
+                            content))))
+             messages)))
 
 
 (defun ai-mode-anthropic--setup-assistant-backend ()
