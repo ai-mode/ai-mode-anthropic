@@ -296,6 +296,25 @@ ITEMS should contain message entries with 'text fields."
   (mapcar #'ai-mode-anthropic--make-typed-struct items))
 
 
+(defun ai-mode-anthropic--convert-usage-metadata-to-plist (usage-metadata)
+  "Convert USAGE-METADATA from Anthropic API response to a plist.
+Maps Anthropic API field names to standardized keys:
+- input_tokens -> :input-tokens
+- cache_creation_input_tokens -> :input-tokens-write-cache
+- cache_read_input_tokens -> :input-tokens-read-cache
+- output_tokens -> :output-tokens
+- total-tokens calculated as sum of input and output tokens"
+  (let ((input-tokens (cdr (assoc 'input_tokens usage-metadata)))
+        (cache-creation-tokens (cdr (assoc 'cache_creation_input_tokens usage-metadata)))
+        (cache-read-tokens (cdr (assoc 'cache_read_input_tokens usage-metadata)))
+        (output-tokens (cdr (assoc 'output_tokens usage-metadata))))
+    (list :input-tokens input-tokens
+          :input-tokens-write-cache cache-creation-tokens
+          :input-tokens-read-cache cache-read-tokens
+          :output-tokens output-tokens
+          :total-tokens (+ (or input-tokens 0) (or output-tokens 0)))))
+
+
 (cl-defun ai-mode-anthropic--convert-context-to-request-data (context model &key (extra-params nil) enable-caching)
   "Convert CONTEXT associative array to request data format.
 
@@ -341,7 +360,7 @@ The number of cached blocks is limited to ai-mode-anthropic-max-cache-blocks."
 
 
 
-(cl-defun ai-mode-anthropic--async-send-context (context model &key success-callback (fail-callback nil) enable-caching (extra-params nil) )
+(cl-defun ai-mode-anthropic--async-send-context (context model &key success-callback (fail-callback nil) update-usage-callback enable-caching (extra-params nil))
   "Async execute CONTEXT, extract message from response and call SUCCESS-CALLBACK.
 
 If request fails, call FAIL-CALLBACK.
@@ -352,7 +371,10 @@ When ENABLE-CACHING is non-nil, prompt caching will be evaluated and applied
 to appropriate messages based on their content and type using
 `ai-mode-adapter-api-should-cache-content-p`. TTL is determined individually
 for each record based on its parameters. The number of cached blocks is
-limited to ai-mode-anthropic-max-cache-blocks."
+limited to ai-mode-anthropic-max-cache-blocks.
+
+When UPDATE-USAGE-CALLBACK is provided, it will be called with usage statistics
+converted from the response's usage field."
 
   (let* ((request-data (ai-mode-anthropic--convert-context-to-request-data
                         context model
@@ -368,7 +390,11 @@ limited to ai-mode-anthropic-max-cache-blocks."
              (funcall fail-callback request-data (ai-mode-anthropic--json-error-to-typed-struct response)))
          (let* ((response-content (ai-mode-anthropic--extract-response-or-error response))
                 (choices (ai-mode-anthropic--get-response-choices response-content))
-                (messages (ai-mode-anthropic--convert-items-to-context-structs choices)))
+                (messages (ai-mode-anthropic--convert-items-to-context-structs choices))
+                (usage-metadata (cdr (assoc 'usage response))))
+           (when (and update-usage-callback usage-metadata)
+             (let ((usage-stats (ai-mode-anthropic--convert-usage-metadata-to-plist usage-metadata)))
+               (funcall update-usage-callback usage-stats)))
            (funcall success-callback messages))))
      :fail-callback fail-callback
      :extra-params extra-params
