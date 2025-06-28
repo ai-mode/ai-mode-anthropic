@@ -1,4 +1,4 @@
-## Anthropic Backend for AI Mode
+# Anthropic Backend for AI Mode
 
 ## Table of Contents
 
@@ -7,9 +7,12 @@
   - [Git Installation](#git-installation)
   - [Package Manager (Future)](#package-manager-future)
 - [Configuration](#configuration)
+  - [Basic Configuration](#basic-configuration)
+  - [Prompt Caching Configuration](#prompt-caching-configuration)
 - [Usage](#usage)
   - [Model Selection](#model-selection)
   - [Integration with AI Mode Features](#integration-with-ai-mode-features)
+  - [Prompt Caching](#prompt-caching)
   - [Advanced Configuration](#advanced-configuration)
   - [Adding Custom Models](#adding-custom-models)
 - [Related Resources](#related-resources)
@@ -27,6 +30,7 @@ Key features:
 - **Native API integration**: Direct communication with Anthropic's API using proper authentication and request handling
 - **Asynchronous operation**: Non-blocking API calls ensure smooth editor performance during AI interactions
 - **Model management**: Easy model selection and switching between different Claude offerings
+- **Prompt caching support**: Optimize performance and reduce costs with intelligent caching of frequently used content
 
 This backend plugin enables `ai-mode` to harness the power of Anthropic's Claude models, providing the necessary infrastructure for API communication, authentication, and response processing within the broader `ai-mode` ecosystem.
 
@@ -62,6 +66,8 @@ Alternatively, you can use `use-package` for a more modular setup:
 
 ## Configuration
 
+### Basic Configuration
+
 To enable the Anthropic backend, you need to set your API key in your `.emacs` file:
 
 ```elisp
@@ -69,6 +75,24 @@ To enable the Anthropic backend, you need to set your API key in your `.emacs` f
 ```
 
 Make sure that your API key is valid and has the necessary permissions for making API requests to ensure seamless interaction.
+
+### Prompt Caching Configuration
+
+The backend includes support for Anthropic's prompt caching feature, which can significantly reduce latency and costs for frequently used content. You can configure caching behavior:
+
+```elisp
+;; Maximum number of cached blocks per request (default: 4)
+(setq ai-mode-anthropic-max-cache-blocks 4)
+
+;; API version with caching support (automatically managed)
+(setq ai-mode-anthropic-version "2023-06-01")
+```
+
+The backend automatically manages cache headers and TTL ordering based on content analysis. When caching is enabled, the system:
+- Evaluates content for caching eligibility using `ai-mode-adapter-api-should-cache-content-p`
+- Determines appropriate TTL values individually for each content block
+- Ensures proper ordering to comply with Anthropic's API requirements
+- Automatically adds the required beta header for 1-hour cache support when needed
 
 ## Usage
 
@@ -92,16 +116,36 @@ The Anthropic backend works with all `ai-mode` capabilities:
 - **Documentation generation**: Create comprehensive docs using language models
 - **Custom prompts**: Send any prompt through the unified `ai-mode` interface
 
+### Prompt Caching
+
+When enabled by `ai-mode`, the backend automatically optimizes requests using Anthropic's prompt caching:
+
+- **Automatic cache detection**: Content is automatically evaluated for caching eligibility
+- **TTL management**: Individual TTL values are calculated based on content characteristics
+- **Cost optimization**: Frequently accessed content is cached to reduce API costs
+- **Performance improvement**: Cached content reduces response latency
+- **Intelligent ordering**: The system ensures proper TTL ordering to meet API requirements
+
+Caching is most effective for:
+- System prompts and instructions
+- Large context files
+- Frequently referenced documentation
+- Project-specific context that doesn't change often
+
 ### Advanced Configuration
 
 Customize model behavior per use case:
 
 ```elisp
 ;; Set custom parameters for specific models
-(setq ai-mode-anthropic--model-temperature 0.2)  ; Lower temperature for more focused responses
-(setq ai-mode-anthropic--default-max-tokens 4096)  ; Adjust token limit
-(setq ai-mode-anthropic-request-timeout 120)  ; Extend timeout for complex requests
-(setq ai-mode-anthropic-version "2023-06-01")  ; API version
+(setq ai-mode-anthropic--model-temperature 0.7)  ; Sampling temperature (default: 0.7)
+(setq ai-mode-anthropic--default-max-tokens 4096)  ; Maximum tokens limit (default: 4096)
+(setq ai-mode-anthropic-request-timeout 60)  ; Request timeout in seconds (default: 60)
+(setq ai-mode-anthropic-version "2023-06-01")  ; API version (default: "2023-06-01")
+(setq ai-mode-anthropic--completion-choices 1)  ; Number of completions (default: 1)
+
+;; Prompt caching settings
+(setq ai-mode-anthropic-max-cache-blocks 4)  ; Maximum cached blocks per request (default: 4)
 ```
 
 ### Adding Custom Models
@@ -114,17 +158,17 @@ To add a custom model, modify your Emacs configuration file (e.g., `.emacs` or `
 (add-to-list 'ai-mode--models-providers
              (lambda ()
                (list (ai-mode-anthropic--make-model "claude-3-5-sonnet-20240620"
-                                                       :name "My Custom Claude Sonnet"
-                                                       :temperature 0.5
-                                                       :max-tokens 8192))))
+                                                    :name "My Custom Claude Sonnet"
+                                                    :temperature 0.5
+                                                    :max-tokens 8192))))
 
 ;; If you use ai-chat, also add it to ai-chat--models-providers
 (add-to-list 'ai-chat--models-providers
              (lambda ()
                (list (ai-mode-anthropic--make-model "claude-3-5-sonnet-20240620"
-                                                       :name "My Custom Claude Sonnet"
-                                                       :temperature 0.5
-                                                       :max-tokens 8192))))
+                                                    :name "My Custom Claude Sonnet"
+                                                    :temperature 0.5
+                                                    :max-tokens 8192))))
 ```
 
 In this example:
@@ -134,7 +178,7 @@ In this example:
 
 Remember to restart Emacs or re-evaluate your configuration after making changes. Your custom model will then appear in `ai-mode`'s model selection list.
 
-The backend handles all API communication, authentication, and response processing automatically, allowing you to focus on your work while benefiting from Anthropic's powerful Claude models.
+The backend handles all API communication, authentication, response processing, and prompt caching automatically, allowing you to focus on your work while benefiting from Anthropic's powerful Claude models with optimized performance and cost efficiency.
 
 ## Related Resources
 
