@@ -49,7 +49,6 @@
 ;; Happy coding! ;)
 
 
-(require 'ai-utils)
 (require 'ai-mode-adapter-api) ; Added require statement
 (require 'url)
 
@@ -146,7 +145,7 @@ USE-1H-CACHE when non-nil enables 1-hour cache support by adding the appropriate
     ;; Add beta header for 1-hour cache support if needed
     (when use-1h-cache
       (push '("anthropic-beta" . "extended-cache-ttl-2025-04-11") headers))
-    (ai-utils--async-request api-url "POST" encoded-request-data headers callback :timeout timeout)))
+    (ai-mode-adapter-api-async-request api-url "POST" encoded-request-data headers callback :timeout timeout)))
 
 (defcustom ai-mode-anthropic--struct-type-role-mapping
   '((system . "user")
